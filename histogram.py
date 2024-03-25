@@ -1,7 +1,15 @@
 import numpy as np
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 from marvin.tools import Maps
 import marvin
+import pandas as pd
+import copy
+import marvin.utils.plot.colorbar as colorbar
+from marvin.utils.datamodel.dap import datamodel
+from marvin import config
+from astropy import units
+import matplotlib.patches as mpatches
 
 def mask_PSB(hvalue, dvalue, divar, snr):  #returns a mask of all spaxels that satisfy the PSB criteria, params are 2d arrays, hvalue = halpha, dvalue = hdelta, divar = hdelta inverse variance, snr = signal to noise ratio
     psb = np.zeros(hvalue.shape, dtype=bool)
@@ -34,8 +42,12 @@ def mask_low_snr(value, ivar, snr_min): #marvin function to mask low_snr spaxels
     return low_snr
 
 def get_histogram(galaxy_id): #returns the histogram frequencies for one galaxy, input is its plateifu ID. 
+    marvin.config.mode = 'local'
     np.seterr(divide='ignore')
-    galaxy = marvin.tools.Maps(galaxy_id, bintype='HYB10')
+    try: 
+        galaxy = marvin.tools.Maps(galaxy_id, bintype='HYB10')
+    except:
+        raise Exception("Invalid galaxy: " + galaxy_id)
     alpha = galaxy.emline_gew_ha_6564
     delta = galaxy.specindex_hdeltaagalaxy
     snr = galaxy.spx_snr
@@ -49,7 +61,7 @@ def get_histogram(galaxy_id): #returns the histogram frequencies for one galaxy,
     total_spax = get_total_spaxels(alpha)
     #print(np.count_nonzero(maskpsb))
 
-    masks, fig, axes = galaxy.get_bpt(use_oi = False, show_plot=False)
+    masks, fig, axes = galaxy.get_bpt(use_oi = False, show_plot=False, return_figure=False)
 
     comp_mask = maskpsb & masks['comp']['nii'] 
     comp_psbcount = np.count_nonzero(comp_mask)
@@ -90,23 +102,28 @@ def plot(galaxy_list): #Creates histogram for a list of plateifus.
     psb_noncategorized = 0
     nopsb_noncategorized = 0
     index = 0
+    df = pd.DataFrame()
     for galaxy in galaxy_list:
-        counts = get_histogram(galaxy)
-        index += 1
-        if index % 20 == 0:
-            print(index)
-        comp_psbTotal += counts[0]
-        comp_nopsbTotal += counts[1]
-        sf_psbTotal += counts[2]
-        sf_nopsbTotal += counts[3]
-        amb_psbTotal += counts[4]
-        amb_noTotal += counts[5]
-        seyf_psbTotal += counts[6]
-        seyf_noTotal += counts[7]
-        liner_psbTotal += counts[8]
-        liner_nopsbTotal += counts[9]
-        psb_noncategorized += counts[10]
-        nopsb_noncategorized += counts[11]
+        try:
+            counts = get_histogram(galaxy)
+            df[galaxy] = counts
+            index += 1
+            if index % 20 == 0:
+                print(index)
+            comp_psbTotal += counts[0]
+            comp_nopsbTotal += counts[1]
+            sf_psbTotal += counts[2]
+            sf_nopsbTotal += counts[3]
+            amb_psbTotal += counts[4]
+            amb_noTotal += counts[5]
+            seyf_psbTotal += counts[6]
+            seyf_noTotal += counts[7]
+            liner_psbTotal += counts[8]
+            liner_nopsbTotal += counts[9]
+            psb_noncategorized += counts[10]
+            nopsb_noncategorized += counts[11]
+        except:
+            pass
 
     categories = ('Star Forming', 'Composite', 'Ambiguous', 'Seyfert', 'LINER', 'Nonclassified')
     category_counts = {
@@ -137,5 +154,460 @@ def plot(galaxy_list): #Creates histogram for a list of plateifus.
         horizontalalignment='right',
         verticalalignment='top',
         transform = ax.transAxes)
-
+    
+    df.to_csv('out.csv', index=False) 
     plt.show()
+    return df
+
+def plot_PSB(galaxy_id): #Plots PSB layered with Seyfert spaxels and counts the average distance
+    marvin.config.mode = 'local'
+    try: 
+        galaxy = marvin.tools.Maps(galaxy_id, bintype='HYB10')
+    except:
+        raise Exception("Invalid galaxy: " + galaxy_id)
+    alpha = galaxy.emline_gew_ha_6564
+    delta = galaxy.specindex_hdeltaagalaxy
+    snr = galaxy.spx_snr
+    snr_value = getattr(snr, 'value', None)
+    
+    value = getattr(alpha, 'value', None)
+    dvalue = getattr(delta, 'value', None)
+    divar = getattr(delta, 'ivar', None)
+
+    imshow_kws = {}
+    cb_kws = {}
+
+    masks_bpt = galaxy.get_bpt(use_oi = False, show_plot=False, return_figure=False)
+
+    #print(sum(masks_bpt['seyfert']['sii'] ))
+    
+    maskpsb = mask_PSB(value, dvalue, divar, snr_value)
+    print(maskpsb.sum())
+    sf_mask = maskpsb & masks_bpt['seyfert']['sii'] 
+
+    dapmap = alpha
+    
+    mask = getattr(dapmap, 'mask', np.zeros(value.shape, dtype=bool))
+    nocov = _mask_nocov(dapmap, mask, divar)
+    low_snr = mask_low_snr(value, divar, 0)
+
+    psb_spax = np.ma.array(np.ones(value.shape) * 100, mask=~maskpsb)
+    seyf_spax = np.ma.array(np.ones(value.shape) * 100, mask=~masks_bpt['seyfert']['sii'] )
+    comb_spax = np.ma.array(np.ones(value.shape) * 100, mask=~sf_mask)
+    #psb_spax = np.ma.array(value, mask=~sf_mask)
+    good_spax = np.ma.array(value, mask=np.logical_or.reduce((nocov, low_snr)))
+
+    prop = dapmap.datamodel.full()
+    dapver = dapmap._datamodel.parent.release if dapmap is not None else config.lookUpVersions()[1]
+    params = datamodel[dapver].get_plot_params(prop)
+    cmap = params['cmap']
+    percentile_clip = params['percentile_clip']
+    symmetric = params['symmetric']
+    snr_min = params['snr_min']
+    
+    cb_kws['cmap'] = cmap
+    cb_kws['percentile_clip'] = percentile_clip
+    cb_kws['cbrange'] = None
+    cb_kws['symmetric'] = symmetric
+    cblabel = None
+
+    cblabel = cblabel if cblabel is not None else getattr(dapmap, 'unit', '')
+    if isinstance(cblabel, units.UnitBase):
+        cb_kws['label'] = cblabel.to_string('latex_inline')
+    else:
+        cb_kws['label'] = cblabel
+
+    cb_kws['log_cb'] = False
+    cb_kws = colorbar._set_cb_kws(cb_kws)
+    cb_kws = colorbar._set_cbrange(good_spax, cb_kws)
+
+    extent = _set_extent(value.shape)
+
+    imshow_kws.setdefault('extent', extent)
+    imshow_kws.setdefault('interpolation', 'nearest')
+    imshow_kws.setdefault('origin', 'lower')
+    imshow_kws['norm'] = None
+                         
+    nocov_kws = copy.deepcopy(imshow_kws)
+    nocov_image = np.ma.array(np.ones(value.shape), mask=~nocov.astype(bool))
+    A8A8A8 = colorbar._one_color_cmap(color='#A8A8A8')
+    
+    patch_kws = _set_patch_style({}, extent)
+    imshow_kws = colorbar._set_vmin_vmax(imshow_kws, cb_kws['cbrange'])
+    
+    fig, ax = _ax_setup(False, None, None)
+
+    # plot hatched regions by putting one large patch as lowest layer
+    # hatched regions are bad data, low SNR, or negative values if the colorbar is logarithmic
+    ax.add_patch(mpl.patches.Rectangle(**patch_kws))
+
+    # plot regions without IFU coverage as a solid color (gray #A8A8A8)
+    ax.imshow(nocov_image, cmap=A8A8A8, zorder=1, **nocov_kws)
+
+    # plot unmasked spaxels
+    #print(psb_
+    #print(psb_spax)
+    ax.imshow(psb_spax, cmap='cool', zorder=12, **imshow_kws, alpha=0.7)
+    ax.imshow(seyf_spax, cmap='autumn', zorder=12, **imshow_kws, alpha=0.7)
+    ax.imshow(comb_spax, cmap='Reds', zorder=12, **imshow_kws, alpha=1)
+    p = ax.imshow(good_spax, cmap=cb_kws['cmap'], zorder=10, **imshow_kws)
+
+    cmaps = {1:'yellow',2:'magenta',3:'maroon'}
+    labels = {1:'seyfert',2:'psb',3:'both'}
+    patches =[mpatches.Patch(color=cmaps[i],label=labels[i]) for i in cmaps]
+    plt.legend(handles=patches, loc=4, borderaxespad=0.)
+    
+    fig, cb = colorbar._draw_colorbar(fig, mappable=p, ax=ax, **cb_kws)
+
+    ax.set_title("Seyfert + PSB overlap for: " + galaxy_id)
+
+    radii = galaxy.spx_ellcoo_elliptical_radius
+    radii_value = getattr(radii, 'value', None)
+    
+    comb_dist = calc_dist(sf_mask, radii_value)
+    seyf_dist = calc_dist(masks_bpt['seyfert']['sii'], radii_value)
+    psb_dist = calc_dist(maskpsb, radii_value)
+
+    print("Average distance of spaxel with both properties: " + str(np.median(comb_dist)))
+    print("Average distance of Seyfert spaxel: " + str(np.median(seyf_dist)))
+    print("Average distance of PSB spaxel: " + str(np.median(psb_dist)))
+
+def _mask_nocov(dapmap, mask, ivar=None):
+
+    assert (dapmap is not None) or (mask is not None) or (ivar is not None)
+
+    if dapmap is None:
+        pixmask = Maskbit('MANGA_DAPPIXMASK')
+        pixmask.mask = mask
+    else:
+        pixmask = dapmap.pixmask
+
+    try:
+        return pixmask.get_mask('NOCOV')
+    except (MarvinError, AttributeError, IndexError, TypeError):
+        return ivar == 0
+
+def _set_patch_style(patch_kws, extent):
+    patch_kws_default = dict(xy=(extent[0] + 0.01, extent[2] + 0.01),
+                             width=extent[1] - extent[0] - 0.02,
+                             height=extent[3] - extent[2] - 0.02, hatch='xxxx', linewidth=0,
+                             fill=True, facecolor='#A8A8A8', edgecolor='w', zorder=0)
+
+    for k, v in patch_kws_default.items():
+        if k not in patch_kws:
+            patch_kws[k] = v
+
+    return patch_kws
+
+def _set_extent(cube_size):
+    extent = np.array([0, cube_size[0] - 1, 0, cube_size[1] - 1])
+
+    return extent
+
+def _ax_setup(sky_coords, fig=None, ax=None, facecolor='#A8A8A8'):
+    xlabel = 'arcsec' if sky_coords else 'spaxel'
+    ylabel = 'arcsec' if sky_coords else 'spaxel'
+
+    if ax is None:
+        fig, ax = plt.subplots()
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+
+    if int(mpl.__version__.split('.')[0]) <= 1:
+        ax.set_axis_bgcolor(facecolor)
+    else:
+        ax.set_facecolor(facecolor)
+        ax.grid(False, which='both', axis='both')
+
+    return fig, ax
+
+def calc_dist(mask, radii):
+    valid_spax = np.ma.array(radii, mask=~mask)
+    data = valid_spax[valid_spax.mask == False]
+    #print(data)
+    return data
+    
+def median_seyf_distance(galaxy_id): #computes median of distances from center of galaxy to a seyfert spaxel
+    try: 
+        galaxy = marvin.tools.Maps(galaxy_id, bintype='HYB10')
+    except:
+        raise Exception("Invalid galaxy: " + galaxy_id)
+        
+    radii = galaxy.spx_ellcoo_r_h_kpc
+    radii_value = getattr(radii, 'value', None)
+    #print(radii)
+    #plt.imshow(radii_value, interpolation='none')
+    #plt.show()
+
+    masks_bpt = galaxy.get_bpt(use_oi = False, show_plot=False, return_figure=False)
+    
+    seyf_dist = calc_dist(masks_bpt['seyfert']['sii'], radii_value)
+
+    seyf_dist = seyf_dist.data / (1 / 0.7) #divide by 1 / h where h = 0.7
+    #print("Median distance of Seyfert spaxel: " + str(np.median(seyf_dist)))
+    #try: 
+      #  dap = galaxy.dapall
+      #  galaxy_dist = dap['adist_z']
+      #  return np.sin(np.median(seyf_dist)*(4.84814 * 10**(-6))) * galaxy_dist
+    #except:
+      #  raise Exception("Invalid galaxy: " + galaxy_id)
+        # return ? 
+    if seyf_dist.size < 5: #min 5
+        return np.nan
+    return np.median(seyf_dist)
+    
+def psb_seyf_helper(galaxy_id):
+    try: 
+        galaxy = marvin.tools.Maps(galaxy_id, bintype='HYB10')
+    except:
+        print("Invalid galaxy: " + galaxy_id)
+        raise Exception("Invalid galaxy: " + galaxy_id)
+    #print(galaxy)
+    alpha = galaxy.emline_gew_ha_6564
+    delta = galaxy.specindex_hdeltaagalaxy
+    snr = galaxy.spx_snr
+    snr_value = getattr(snr, 'value', None)
+    
+    value = getattr(alpha, 'value', None)
+    dvalue = getattr(delta, 'value', None)
+    divar = getattr(delta, 'ivar', None)
+
+    masks_bpt = galaxy.get_bpt(use_oi = False, show_plot=False, return_figure=False)
+    
+    maskpsb = mask_PSB(value, dvalue, divar, snr_value)
+    radii = galaxy.spx_ellcoo_r_h_kpc
+    radii_value = getattr(radii, 'value', None)
+    sf_mask = maskpsb & masks_bpt['seyfert']['sii']
+
+    seyf_dist = calc_dist(masks_bpt['seyfert']['sii'], radii_value)
+    comb_dist = calc_dist(sf_mask, radii_value)
+
+    if seyf_dist.size < 5: #min 5
+        seyf_dist = np.nan
+    else:
+        seyf_dist = seyf_dist.data / (1 / 0.7)
+    if comb_dist.size < 5:
+        comb_dist = np.nan
+    else:
+        comb_dist = comb_dist.data / (1 / 0.7)
+
+    return np.median(seyf_dist), np.median(comb_dist)
+    
+def plot_seyf_distance(galaxies): 
+    dists = []
+    non_seyferts = 0
+    count = 0
+    for i in galaxies:
+        if count % 20 == 0:
+            print(count)
+        median_dist = median_seyf_distance(i)
+        if np.isnan(median_dist):
+            non_seyferts += 1
+        else:
+            if median_dist > 3:
+                print(i)
+            dists.append(median_dist)
+        count =+ 1
+    n_bins = 15
+    print("Galaxies without seyfert region: " + str(non_seyferts))
+    plt.hist(dists, bins=n_bins)
+    plt.title("Average Distance of Seyfert region to Galactic Center")
+    plt.xlabel("Distance")
+    plt.ylabel("Frequency")
+    plt.show()
+
+
+def process_psb(galaxies, filename):
+    psbspaxels, nonpsbspaxels = [], []
+    count = 0
+    df = pd.DataFrame(columns=['IFU', 'Seyf_dist', 'PSB_dist'])
+    for i in galaxies:
+        if count % 20 == 0:
+            print(count)
+        try:
+            seyf, comb = psb_seyf_helper(i)
+        except:
+            print("Invalid galaxy: " + str(i))
+            pass
+        df.loc[count] = [i] + [seyf] + [comb]
+        if not np.isnan(comb):
+            psbspaxels.append(comb)
+        if not np.isnan(seyf):
+            nonpsbspaxels.append(seyf)
+        count += 1
+    df.to_csv(filename + '.csv', index=False)
+    return psbspaxels, nonpsbspaxels
+
+
+def process_nonpsb(galaxies): #?? why did i write this 
+    psbspaxels, nonpsbspaxels = [], []
+    count = 0
+    for i in galaxies:
+        if count % 20 == 0:
+            print(count)
+        seyf, comb = psb_seyf_helper(i)
+        if not np.isnan(comb):
+            psbspaxels.append(comb)
+        if not np.isnan(seyf):
+            nonpsbspaxels.append(seyf)
+        count += 1
+    return psbspaxels, nonpsbspaxels
+    
+def comparison_plot_bpt(psbgalaxies, nonpsbgalaxies): #not used
+    categories = ('Star Forming', 'Composite', 'Ambiguous', 'Seyfert', 'LINER', 'Nonclassified')
+    category_counts = {
+    'PSB': (sf_psbTotal, comp_psbTotal, amb_psbTotal, seyf_psbTotal, liner_psbTotal, psb_noncategorized),
+    'No PSB': (sf_nopsbTotal, comp_nopsbTotal, amb_noTotal, seyf_noTotal, liner_nopsbTotal, nopsb_noncategorized),
+    }
+
+    x = np.arange(len(categories))  # the label locations
+    width = 0.4
+    multiplier = 0
+
+    fig, ax = plt.subplots(layout='constrained')
+
+    for category, count in category_counts.items():
+        offset = width * multiplier
+        rects = ax.bar(x + offset, count, width, label=category)
+        ax.bar_label(rects, padding=3)
+        multiplier += 1
+
+    ax.set_ylabel('Frequency')
+    ax.set_title('PSB vs non-PSB Spaxels for all galaxies')
+    ax.set_xticks(x + width - 0.20, categories)
+    ax.legend(loc='upper left')
+    maxy = max([sf_psbTotal, comp_psbTotal, amb_psbTotal, seyf_psbTotal, liner_psbTotal, sf_nopsbTotal, comp_nopsbTotal, amb_noTotal, seyf_noTotal, liner_nopsbTotal])
+    maxy = 1.2*maxy
+    ax.set_ylim([0, maxy])
+    ax.text(0.87, 0.76, str(nopsb_noncategorized),
+        horizontalalignment='right',
+        verticalalignment='top',
+        transform = ax.transAxes)
+    plt.show()
+    
+def comparison_plot_dist(psbgalaxies, nonpsbgalaxies):
+    psbgalaxy_psbspaxels, psbgalaxy_nonpsbspaxels = psbgalaxies
+    galaxy_psbspaxels, galaxy_nonpsbspaxels = nonpsbgalaxies
+    
+    fig, axs = plt.subplots(2, 1, constrained_layout=True)
+    n_bins = 15
+    axs[0].hist([psbgalaxy_psbspaxels, galaxy_psbspaxels], bins='sqrt', label=['PSB Galaxy', 'Non-PSB Galaxy'], density=True, histtype='step')
+    axs[0].set_title("PSB and Seyfert")
+    #w = axs[0].get_yticks() 
+    #axs[0].set_yticks(w,np.round(w/(len(psbgalaxy_psbspaxels) + len(galaxy_psbspaxels)),3))
+    axs[0].set_xticks(np.arange(0, 3.5, 0.5))
+    axs[1].hist([psbgalaxy_nonpsbspaxels, galaxy_nonpsbspaxels], bins='sqrt', label=['PSB Galaxy', 'Non-PSB Galaxy'], density=True, histtype='step')
+    #axs[1].set_xticks(np.arange(0, 25, 1))
+    axs[1].set_title("Seyfert")
+    axs[0].legend(loc='upper right')
+    axs[1].legend(loc='upper right')
+    plt.show()
+
+def visualize_seyf(galaxy_id):
+    galaxy = marvin.tools.Maps(galaxy_id, bintype='HYB10')
+    alpha = galaxy.emline_gew_ha_6564
+    delta = galaxy.specindex_hdeltaagalaxy
+    snr = galaxy.spx_snr
+    snr_value = getattr(snr, 'value', None)
+    
+    value = getattr(alpha, 'value', None)
+    dvalue = getattr(delta, 'value', None)
+    divar = getattr(delta, 'ivar', None)
+
+    imshow_kws = {}
+    cb_kws = {}
+
+    masks_bpt = galaxy.get_bpt(use_oi = False, show_plot=True, return_figure=False)
+
+    #print(sum(masks_bpt['seyfert']['sii'] ))
+    
+    maskpsb = mask_PSB(value, dvalue, divar, snr_value)
+    print(maskpsb.sum())
+    sf_mask = maskpsb & masks_bpt['seyfert']['sii'] 
+
+    dapmap = alpha
+    
+    mask = getattr(dapmap, 'mask', np.zeros(value.shape, dtype=bool))
+    nocov = _mask_nocov(dapmap, mask, divar)
+    low_snr = mask_low_snr(value, divar, 0)
+
+    psb_spax = np.ma.array(np.ones(value.shape) * 100, mask=~maskpsb)
+    seyf_spax = np.ma.array(np.ones(value.shape) * 100, mask=~masks_bpt['seyfert']['sii'] )
+    comb_spax = np.ma.array(np.ones(value.shape) * 100, mask=~sf_mask)
+    #psb_spax = np.ma.array(value, mask=~sf_mask)
+    good_spax = np.ma.array(value, mask=np.logical_or.reduce((nocov, low_snr)))
+
+    prop = dapmap.datamodel.full()
+    dapver = dapmap._datamodel.parent.release if dapmap is not None else config.lookUpVersions()[1]
+    params = datamodel[dapver].get_plot_params(prop)
+    cmap = params['cmap']
+    percentile_clip = params['percentile_clip']
+    symmetric = params['symmetric']
+    snr_min = params['snr_min']
+    
+    cb_kws['cmap'] = cmap
+    cb_kws['percentile_clip'] = percentile_clip
+    cb_kws['cbrange'] = None
+    cb_kws['symmetric'] = symmetric
+    cblabel = None
+
+    cblabel = cblabel if cblabel is not None else getattr(dapmap, 'unit', '')
+    if isinstance(cblabel, units.UnitBase):
+        cb_kws['label'] = cblabel.to_string('latex_inline')
+    else:
+        cb_kws['label'] = cblabel
+
+    cb_kws['log_cb'] = False
+    cb_kws = colorbar._set_cb_kws(cb_kws)
+    cb_kws = colorbar._set_cbrange(good_spax, cb_kws)
+
+    extent = _set_extent(value.shape)
+
+    imshow_kws.setdefault('extent', extent)
+    imshow_kws.setdefault('interpolation', 'nearest')
+    imshow_kws.setdefault('origin', 'lower')
+    imshow_kws['norm'] = None
+                         
+    nocov_kws = copy.deepcopy(imshow_kws)
+    nocov_image = np.ma.array(np.ones(value.shape), mask=~nocov.astype(bool))
+    A8A8A8 = colorbar._one_color_cmap(color='#A8A8A8')
+    
+    patch_kws = _set_patch_style({}, extent)
+    imshow_kws = colorbar._set_vmin_vmax(imshow_kws, cb_kws['cbrange'])
+    
+    fig, ax = _ax_setup(False, None, None)
+
+    # plot hatched regions by putting one large patch as lowest layer
+    # hatched regions are bad data, low SNR, or negative values if the colorbar is logarithmic
+    ax.add_patch(mpl.patches.Rectangle(**patch_kws))
+
+    # plot regions without IFU coverage as a solid color (gray #A8A8A8)
+    ax.imshow(nocov_image, cmap=A8A8A8, zorder=1, **nocov_kws)
+
+    # plot unmasked spaxels
+    #print(psb_
+    #print(psb_spax)
+    ax.imshow(psb_spax, cmap='cool', zorder=12, **imshow_kws, alpha=0.7)
+    ax.imshow(seyf_spax, cmap='autumn', zorder=12, **imshow_kws, alpha=0.7)
+    ax.imshow(comb_spax, cmap='Reds', zorder=12, **imshow_kws, alpha=1)
+    p = ax.imshow(good_spax, cmap=cb_kws['cmap'], zorder=10, **imshow_kws)
+
+    cmaps = {1:'yellow',2:'magenta',3:'maroon'}
+    labels = {1:'seyfert',2:'psb',3:'both'}
+    patches =[mpatches.Patch(color=cmaps[i],label=labels[i]) for i in cmaps]
+    plt.legend(handles=patches, loc=4, borderaxespad=0.)
+    
+    fig, cb = colorbar._draw_colorbar(fig, mappable=p, ax=ax, **cb_kws)
+
+    ax.set_title("Seyfert + PSB overlap for: " + galaxy_id)
+
+def analyze_seyf(galaxy_id):
+    galaxy = marvin.tools.Maps(galaxy_id, bintype='HYB10')
+    masks_bpt = galaxy.get_bpt(use_oi = False, show_plot=False, return_figure=False)
+    if (np.count_nonzero(masks_bpt['seyfert']['sii']) > 10):
+        return galaxy_id
+        
+        
+        
+    
