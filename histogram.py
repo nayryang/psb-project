@@ -357,43 +357,6 @@ def median_seyf_distance(galaxy_id): #computes median of distances from center o
         return np.nan
     return np.median(seyf_dist)
     
-def psb_seyf_helper(galaxy_id):
-    try: 
-        galaxy = marvin.tools.Maps(galaxy_id, bintype='HYB10')
-    except:
-        print("Invalid galaxy: " + galaxy_id)
-        raise Exception("Invalid galaxy: " + galaxy_id)
-    #print(galaxy)
-    alpha = galaxy.emline_gew_ha_6564
-    delta = galaxy.specindex_hdeltaagalaxy
-    snr = galaxy.spx_snr
-    snr_value = getattr(snr, 'value', None)
-    
-    value = getattr(alpha, 'value', None)
-    dvalue = getattr(delta, 'value', None)
-    divar = getattr(delta, 'ivar', None)
-
-    masks_bpt = galaxy.get_bpt(use_oi = False, show_plot=False, return_figure=False)
-    
-    maskpsb = mask_PSB(value, dvalue, divar, snr_value)
-    radii = galaxy.spx_ellcoo_r_h_kpc
-    radii_value = getattr(radii, 'value', None)
-    sf_mask = maskpsb & masks_bpt['seyfert']['sii']
-
-    seyf_dist = calc_dist(masks_bpt['seyfert']['sii'], radii_value)
-    comb_dist = calc_dist(sf_mask, radii_value)
-
-    if seyf_dist.size < 5: #min 5
-        seyf_dist = np.nan
-    else:
-        seyf_dist = seyf_dist.data / (1 / 0.7)
-    if comb_dist.size < 5:
-        comb_dist = np.nan
-    else:
-        comb_dist = comb_dist.data / (1 / 0.7)
-
-    return np.median(seyf_dist), np.median(comb_dist)
-    
 def plot_seyf_distance(galaxies): 
     dists = []
     non_seyferts = 0
@@ -417,94 +380,124 @@ def plot_seyf_distance(galaxies):
     plt.ylabel("Frequency")
     plt.show()
 
+def psb_LINER_helper(galaxy_id): #Finds average distance of LINER and Seyf spaxel to center for specific galaxy
+    try: 
+        galaxy = marvin.tools.Maps(galaxy_id, bintype='HYB10')
+    except:
+        print("Invalid galaxy: " + galaxy_id)
+        raise Exception("Invalid galaxy: " + galaxy_id)
+    #print(galaxy)
+    alpha = galaxy.emline_gew_ha_6564
+    delta = galaxy.specindex_hdeltaagalaxy
+    snr = galaxy.spx_snr
+    snr_value = getattr(snr, 'value', None)
+    
+    value = getattr(alpha, 'value', None)
+    dvalue = getattr(delta, 'value', None)
+    divar = getattr(delta, 'ivar', None)
 
-def process_psb(galaxies, filename):
+    masks_bpt = galaxy.get_bpt(use_oi = False, show_plot=True, return_figure=False)
+    
+    maskpsb = mask_PSB(value, dvalue, divar, snr_value)
+    radii = galaxy.spx_ellcoo_r_h_kpc
+    radii_value = getattr(radii, 'value', None)
+    
+    liner_mask = maskpsb & masks_bpt['liner']['sii']
+    liner_count = np.count_nonzero(masks_bpt['liner']['sii'])
+    seyf_count = np.count_nonzero(masks_bpt['seyfert']['sii'])
+    
+    sf_mask = maskpsb & masks_bpt['seyfert']['sii']
+    
+    seyf_dist = calc_dist(masks_bpt['seyfert']['sii'], radii_value)
+    combseyf_dist = calc_dist(sf_mask, radii_value)
+
+    liner_dist = calc_dist(masks_bpt['liner']['sii'], radii_value)
+    combliner_dist = calc_dist(liner_mask, radii_value)
+
+    if liner_dist.size < 5: #min 5
+        liner_dist = np.nan
+    else:
+        liner_dist = liner_dist.data / (1 / 0.7)
+    if combliner_dist.size < 5:
+        combliner_dist = np.nan
+    else:
+        combliner_dist = combliner_dist.data / (1 / 0.7)
+
+    if seyf_dist.size < 5: #min 5
+        seyf_dist = np.nan
+    else:
+        seyf_dist = seyf_dist.data / (1 / 0.7)
+    if combseyf_dist.size < 5:
+        combseyf_dist = np.nan
+    else:
+        combseyf_dist = combseyf_dist.data / (1 / 0.7)
+
+    print(seyf_count)
+    return np.median(liner_dist), np.median(seyf_dist), np.median(combliner_dist), np.median(combseyf_dist), liner_count, seyf_count
+
+def process_LINERpsb(galaxies, filename): #Process large amounts of galaxies to create 2 1-d arrays with average distance of LINER and Seyfert spaxels to center of galaxy
     psbspaxels, nonpsbspaxels = [], []
     count = 0
-    df = pd.DataFrame(columns=['IFU', 'Seyf_dist', 'PSB_dist'])
-    for i in galaxies:
+    df = pd.DataFrame(columns=['IFU', 'LINER_dist', 'Seyf_dist', 'LINERPSB_dist', 'SeyfPSB_dist', 'Liner Count', 'Seyf Count'])
+    for i in galaxies: #fix how try and except is handled 
         if count % 20 == 0:
             print(count)
         try:
-            seyf, comb = psb_seyf_helper(i)
+            LINER, seyf, linercomb, seyfcomb, linercount, seyfcount = psb_LINER_helper(i)
         except:
             print("Invalid galaxy: " + str(i))
+            LINER, seyf, linercomb, seyfcomb, linercount, seyfcount = -1, -1, -1, -1, -1, -1
             pass
-        df.loc[count] = [i] + [seyf] + [comb]
-        if not np.isnan(comb):
-            psbspaxels.append(comb)
-        if not np.isnan(seyf):
-            nonpsbspaxels.append(seyf)
+        df.loc[count] = [i] + [LINER] + [seyf] + [linercomb] + [seyfcomb] + [linercount] + [seyfcount]
         count += 1
     df.to_csv(filename + '.csv', index=False)
-    return psbspaxels, nonpsbspaxels
-
-
-def process_nonpsb(galaxies): #?? why did i write this 
-    psbspaxels, nonpsbspaxels = [], []
-    count = 0
-    for i in galaxies:
-        if count % 20 == 0:
-            print(count)
-        seyf, comb = psb_seyf_helper(i)
-        if not np.isnan(comb):
-            psbspaxels.append(comb)
-        if not np.isnan(seyf):
-            nonpsbspaxels.append(seyf)
-        count += 1
-    return psbspaxels, nonpsbspaxels
     
-def comparison_plot_bpt(psbgalaxies, nonpsbgalaxies): #not used
-    categories = ('Star Forming', 'Composite', 'Ambiguous', 'Seyfert', 'LINER', 'Nonclassified')
-    category_counts = {
-    'PSB': (sf_psbTotal, comp_psbTotal, amb_psbTotal, seyf_psbTotal, liner_psbTotal, psb_noncategorized),
-    'No PSB': (sf_nopsbTotal, comp_nopsbTotal, amb_noTotal, seyf_noTotal, liner_nopsbTotal, nopsb_noncategorized),
-    }
-
-    x = np.arange(len(categories))  # the label locations
-    width = 0.4
-    multiplier = 0
-
-    fig, ax = plt.subplots(layout='constrained')
-
-    for category, count in category_counts.items():
-        offset = width * multiplier
-        rects = ax.bar(x + offset, count, width, label=category)
-        ax.bar_label(rects, padding=3)
-        multiplier += 1
-
-    ax.set_ylabel('Frequency')
-    ax.set_title('PSB vs non-PSB Spaxels for all galaxies')
-    ax.set_xticks(x + width - 0.20, categories)
-    ax.legend(loc='upper left')
-    maxy = max([sf_psbTotal, comp_psbTotal, amb_psbTotal, seyf_psbTotal, liner_psbTotal, sf_nopsbTotal, comp_nopsbTotal, amb_noTotal, seyf_noTotal, liner_nopsbTotal])
-    maxy = 1.2*maxy
-    ax.set_ylim([0, maxy])
-    ax.text(0.87, 0.76, str(nopsb_noncategorized),
-        horizontalalignment='right',
-        verticalalignment='top',
-        transform = ax.transAxes)
-    plt.show()
-    
-def comparison_plot_dist(psbgalaxies, nonpsbgalaxies):
+def comparison_plot_dist(psbgalaxies, nonpsbgalaxies): #Helper function that takes pre-determined distance arrays and creates histogram. For Seyfert distances.
     psbgalaxy_psbspaxels, psbgalaxy_nonpsbspaxels = psbgalaxies
     galaxy_psbspaxels, galaxy_nonpsbspaxels = nonpsbgalaxies
     
     fig, axs = plt.subplots(2, 1, constrained_layout=True)
     n_bins = 15
-    axs[0].hist([psbgalaxy_psbspaxels, galaxy_psbspaxels], bins='sqrt', label=['PSB Galaxy', 'Non-PSB Galaxy'], density=True, histtype='step')
+    axs[0].hist([psbgalaxy_psbspaxels, galaxy_psbspaxels], bins='auto', label=['PSB Galaxy', 'Non-PSB Galaxy'], density=True, histtype='step', cumulative=False)
     axs[0].set_title("PSB and Seyfert")
     #w = axs[0].get_yticks() 
     #axs[0].set_yticks(w,np.round(w/(len(psbgalaxy_psbspaxels) + len(galaxy_psbspaxels)),3))
     axs[0].set_xticks(np.arange(0, 3.5, 0.5))
-    axs[1].hist([psbgalaxy_nonpsbspaxels, galaxy_nonpsbspaxels], bins='sqrt', label=['PSB Galaxy', 'Non-PSB Galaxy'], density=True, histtype='step')
+    axs[1].hist([psbgalaxy_nonpsbspaxels, galaxy_nonpsbspaxels], bins='auto', label=['PSB Galaxy', 'Non-PSB Galaxy'], density=True, histtype='step', cumulative=False)
     #axs[1].set_xticks(np.arange(0, 25, 1))
     axs[1].set_title("Seyfert")
     axs[0].legend(loc='upper right')
     axs[1].legend(loc='upper right')
     plt.show()
 
-def visualize_seyf(galaxy_id):
+def comparison_plot_dist_LINER(psbgalaxies, nonpsbgalaxies): #Helper function that takes pre-determined distance arrays and creates histogram. For LINER distances.
+    psbgalaxy_psbspaxels, psbgalaxy_nonpsbspaxels = psbgalaxies
+    galaxy_psbspaxels, galaxy_nonpsbspaxels = nonpsbgalaxies
+    
+    fig, axs = plt.subplots(2, 1, constrained_layout=True)
+    n_bins = 15
+    axs[0].hist([psbgalaxy_psbspaxels, galaxy_psbspaxels], bins='auto', label=['PSB Galaxy', 'Non-PSB Galaxy'], density=True, histtype='step', cumulative=True)
+    axs[0].set_title("PSB and LINER")
+    #w = axs[0].get_yticks() 
+    #axs[0].set_yticks(w,np.round(w/(len(psbgalaxy_psbspaxels) + len(galaxy_psbspaxels)),3))
+    axs[0].set_xticks(np.arange(0, 3.5, 0.5))
+    axs[1].hist([psbgalaxy_nonpsbspaxels, galaxy_nonpsbspaxels], bins='auto', label=['PSB Galaxy', 'Non-PSB Galaxy'], density=True, histtype='step', cumulative=True)
+    #axs[1].set_xticks(np.arange(0, 25, 1))
+    axs[1].set_title("LINER")
+    axs[0].legend(loc='upper right')
+    axs[1].legend(loc='upper right')
+    plt.show()
+
+def plot_spaxel_frequency(allgalaxies_spax):  #Helper function, takes 1-d array with amount of LINER or Seyfert spaxels for a galaxy and plots it as a histogram.
+    plt.hist(allgalaxies_spax, label=['spaxel'], density=False, histtype='step')
+    plt.title("Amount of Spaxels in Galaxy")
+    plt.xlabel("Amount of Spx")
+    plt.ylabel("Frequency")
+    plt.legend(loc='upper right')
+    #plt.xlim(0,50)
+    plt.show()
+
+def visualize_seyf(galaxy_id):   # Returns plot of H-Alpha with Seyfert, PSB areas as a highlighted overlay.
     galaxy = marvin.tools.Maps(galaxy_id, bintype='HYB10')
     alpha = galaxy.emline_gew_ha_6564
     delta = galaxy.specindex_hdeltaagalaxy
@@ -601,13 +594,6 @@ def visualize_seyf(galaxy_id):
     fig, cb = colorbar._draw_colorbar(fig, mappable=p, ax=ax, **cb_kws)
 
     ax.set_title("Seyfert + PSB overlap for: " + galaxy_id)
-
-def analyze_seyf(galaxy_id):
-    galaxy = marvin.tools.Maps(galaxy_id, bintype='HYB10')
-    masks_bpt = galaxy.get_bpt(use_oi = False, show_plot=False, return_figure=False)
-    if (np.count_nonzero(masks_bpt['seyfert']['sii']) > 10):
-        return galaxy_id
-        
         
         
     
